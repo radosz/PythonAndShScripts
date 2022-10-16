@@ -1,0 +1,116 @@
+#!/bin/python
+import os
+import subprocess
+import sys
+
+PATH = subprocess.run("pwd", capture_output=True, text=True).stdout.strip()
+MERGE_BRANCH = sys.argv[1]
+OURS_OR_THEIRS = sys.argv[2]
+
+GIT_DIFF_PATTERN = "git diff {0}{1}..{2} --name-status --diff-filter={3}"
+GIT_MERGE = "git merge {0} -X {1} --no-edit"
+REMOTE_ALIAS = "origin/"
+
+wd = os.getcwd()
+os.chdir(PATH)
+
+
+def str_after_first(string, target):
+    return string[string.index(target) + len(target):]
+
+
+def str_after_last(string: str, target: str):
+    return string[string.rindex(target) + len(target):]
+
+
+def str_before_last(string: str, target: str):
+    return string[:string.rindex(target)]
+
+
+def to_package_name(string: str):
+    java_str = "java/"
+    string = str_after_last(string, java_str)
+    return str_before_last(string, ".").replace("/", ".")
+
+
+def to_import_names(string: str):
+    return find_import(string, 1), find_import(string, 2)
+
+
+def to_class_name(string: str):
+    string = to_package_name(string)
+    return str_after_last(string, ".")
+
+
+def str_command(command):
+    proc = subprocess.run(command.split(" "), capture_output=True, text=True)
+    if proc.returncode == 0:
+        return proc.stdout
+    return proc.returncode
+
+
+def find_import(in_str: str, pos: int):
+    return in_str.split("\t")[pos].split("java/")[1].replace("/", ".").replace("\\", ".").rsplit(".", 1)[0]
+
+
+def process_a_d(stdout: str):
+    lines = stdout.split("\n")
+    file_names = [str_after_last(x, "/") for x in lines if "." in x]
+    duplicates_files = [x for n, x in enumerate(file_names) if x in file_names[:n]]
+    group = {"A": [], "D": []}
+    for duplicates_file in duplicates_files:
+        for line in lines:
+            if duplicates_file in line:
+                if line.startswith("A"):
+                    group["A"].append(line[line.index("A") + 2:])
+                if line.startswith("D"):
+                    group["D"].append(line[line.index("D") + 2:])
+    result = []
+
+    for new in group["D"]:
+        new_file_name = new[new.rindex("/") + 1]
+        for old in group["A"]:
+            old_file_name = old[old.rindex("/") + 1]
+            if old_file_name == new_file_name:
+                result.append((to_package_name(new), to_package_name(old)))
+    return result
+
+
+def replace_content(lst_tuple_new_old: list, file_content: str):
+    replaced = False
+    for new, old in lst_tuple_new_old:
+        if old in file_content:
+            replaced = True
+            file_content = file_content.replace(old, new)
+    if replaced:
+        return file_content
+
+
+fetch = str_command("git fetch")
+cur_git_branch = str_command("git branch --show-current").strip()
+if isinstance(fetch, str):
+    git_ad = str_command(GIT_DIFF_PATTERN.format(REMOTE_ALIAS, MERGE_BRANCH, cur_git_branch, "AD"))
+    git_r = str_command(GIT_DIFF_PATTERN.format(REMOTE_ALIAS, MERGE_BRANCH, cur_git_branch, "R"))
+else:
+    print("Cannot fetch latest changes from branch {} !!!".format(MERGE_BRANCH))
+    git_ad = str_command(GIT_DIFF_PATTERN.format("", MERGE_BRANCH, cur_git_branch, "AD"))
+    git_r = str_command(GIT_DIFF_PATTERN.format("", MERGE_BRANCH, cur_git_branch, "R"))
+
+java_new_old = [to_import_names(x) for x in git_r.split("\n") if x.endswith(".java")] + process_a_d(git_ad)
+
+for root, dirs, files in os.walk("."):
+    for f in files:
+        if f.endswith(".java") and not root.startswith(".\."):
+            path = root + os.sep + f
+            with open(path, 'r') as file:
+                content = replace_content(java_new_old, file.read())
+            if content:
+                with open(path, 'w') as file:
+                    file.write(content)
+
+str_command("git stash")
+print(GIT_MERGE.format(MERGE_BRANCH, OURS_OR_THEIRS))
+git_merge = str_command(GIT_MERGE.format(MERGE_BRANCH, OURS_OR_THEIRS))
+if isinstance(git_merge, str):
+    str_command("git stash pop")
+print(str_command("git status"))
